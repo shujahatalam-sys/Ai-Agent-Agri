@@ -1,51 +1,47 @@
 from flask import Flask, jsonify
-import joblib
+import firebase_admin
+from firebase_admin import credentials, db
 import pandas as pd
-from supabase import create_client
+import joblib
 import os
+import json
 
 app = Flask(__name__)
 
-# Use environment variables (IMPORTANT)
-URL = os.getenv("SUPABASE_URL")
-KEY = os.getenv("SUPABASE_KEY")
+firebase_creds = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
 
-supabase = create_client(URL, KEY)
+cred = credentials.Certificate(firebase_creds)
 
-model = joblib.load('irrigation_model.pkl')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': os.getenv("FIREBASE_DATABASE_URL")
+})
+
+model = joblib.load("irrigation_model.pkl")
 
 @app.route('/')
 def home():
     return "AI Irrigation Running 🚀"
 
 @app.route('/run-ai', methods=['GET'])
-def run_ai_logic():
+def run_ai():
     try:
-        res = supabase.table("sensor_logs") \
-            .select("*") \
-            .order("created_at", desc=True) \
-            .limit(1) \
-            .execute()
-
-        if not res.data:
-            return jsonify({"error": "No data found"})
-
-        latest = res.data[0]
+        sensor_ref = db.reference('/sensor_data')
+        sensor_data = sensor_ref.get()
 
         input_df = pd.DataFrame([{
-            'Soil_Moisture': latest['soil_moisture'],
-            'Temperature': latest['temp'],
-            'Humidity': latest['humidity'],
-            'Light_Intensity': latest['light_intensity'],
-            'Air_Quality': latest['air_quality']
+            'Soil_Moisture': sensor_data['soil_moisture'],
+            'Temperature': sensor_data['temperature'],
+            'Humidity': sensor_data['humidity'],
+            'Light_Intensity': sensor_data['light_intensity'],
+            'Air_Quality': sensor_data['air_quality']
         }])
 
         prediction = model.predict(input_df)[0]
 
-        supabase.table("device_control") \
-            .update({"pump_active": bool(prediction)}) \
-            .eq("device_id", "nodemcu_01") \
-            .execute()
+        pump_ref = db.reference('/pump_control')
+        pump_ref.set({
+            'pump_active': bool(prediction)
+        })
 
         return jsonify({
             "prediction": int(prediction),
@@ -54,8 +50,6 @@ def run_ai_logic():
 
     except Exception as e:
         return jsonify({"error": str(e)})
-    
-    import os
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
