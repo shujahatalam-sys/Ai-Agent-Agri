@@ -1,55 +1,93 @@
-from flask import Flask, jsonify
-import firebase_admin
-from firebase_admin import credentials, db
-import pandas as pd
-import joblib
 import os
 import json
+import time
+import joblib
+import pandas as pd
+import firebase_admin
 
+from firebase_admin import credentials, db
+from flask import Flask
+
+# ================= FLASK APP =================
 app = Flask(__name__)
 
-firebase_creds = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
+@app.route("/")
+def home():
+    return "AI Irrigation System Running"
+
+# ================= FIREBASE SETUP =================
+firebase_creds = json.loads(os.environ["FIREBASE_CREDENTIALS"])
 
 cred = credentials.Certificate(firebase_creds)
 
 firebase_admin.initialize_app(cred, {
-    'databaseURL': os.getenv("FIREBASE_DATABASE_URL")
+    "databaseURL": "https://fieldsync-edcd7-default-rtdb.firebaseio.com"
 })
 
+# ================= LOAD MODEL =================
 model = joblib.load("irrigation_model.pkl")
 
-@app.route('/')
-def home():
-    return "AI Irrigation Running 🚀"
-
-@app.route('/run-ai', methods=['GET'])
-def run_ai():
+# ================= AI LOGIC =================
+def run_ai_logic():
     try:
-        sensor_ref = db.reference('/sensor_data')
-        sensor_data = sensor_ref.get()
+        # Read sensor values from Firebase
+        soil_moisture = db.reference(
+            "/devices/ESP32_CF637C/sensors/current/soilMoisture"
+        ).get()
 
+        # Default value if missing
+        if soil_moisture is None:
+            soil_moisture = 0
+
+        # Dummy values for missing model inputs
+        temperature = 25
+        humidity = 60
+        light_intensity = 500
+        air_quality = 300
+
+        # Create DataFrame for model
         input_df = pd.DataFrame([{
-            'Soil_Moisture': sensor_data['soil_moisture'],
-            'Temperature': sensor_data['temperature'],
-            'Humidity': sensor_data['humidity'],
-            'Light_Intensity': sensor_data['light_intensity'],
-            'Air_Quality': sensor_data['air_quality']
+            "Soil_Moisture": soil_moisture,
+            "Temperature": temperature,
+            "Humidity": humidity,
+            "Light_Intensity": light_intensity,
+            "Air_Quality": air_quality
         }])
 
+        # Prediction
         prediction = model.predict(input_df)[0]
 
-        pump_ref = db.reference('/pump_control')
-        pump_ref.set({
-            'pump_active': bool(prediction)
-        })
+        # Safety rule
+        pump_on = bool(prediction)
 
-        return jsonify({
-            "prediction": int(prediction),
-            "status": "Watering" if prediction else "Idle"
-        })
+        # Never run pump if soil already wet
+        if soil_moisture > 70:
+            pump_on = False
+
+        # Force ON if soil too dry
+        if soil_moisture < 20:
+            pump_on = True
+
+        # Save AI decision to Firebase
+        db.reference(
+            "/devices/ESP32_CF637C/commands/pump"
+        ).set(pump_on)
+
+        print("=================================")
+        print(f"Soil Moisture: {soil_moisture}")
+        print(f"AI Prediction: {prediction}")
+        print(f"Pump Command: {'ON' if pump_on else 'OFF'}")
+        print("=================================")
 
     except Exception as e:
-        return jsonify({"error": str(e)})
+        print("AI Error:", e)
 
+# ================= BACKGROUND LOOP =================
+while True:
+    run_ai_logic()
+    time.sleep(10)
+
+# ================= RUN SERVER =================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
