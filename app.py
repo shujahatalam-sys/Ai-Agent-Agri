@@ -31,22 +31,31 @@ model = joblib.load("irrigation_model.pkl")
 # ================= AI LOGIC =================
 def run_ai_logic():
     try:
-        # Read soil moisture from Firebase
+        # Read current soil moisture from Firebase
         soil_moisture = db.reference(
             "/devices/ESP32_CF637C/sensors/current/soilMoisture"
         ).get()
 
-        # Default value if missing
+        # Default if missing
         if soil_moisture is None:
             soil_moisture = 0
 
-        # Dummy values for other model features
+        soil_moisture = int(soil_moisture)
+
+        # Get previous pump state
+        pump_ref = db.reference("/devices/ESP32_CF637C/commands/pump")
+        current_pump_state = pump_ref.get()
+
+        if current_pump_state is None:
+            current_pump_state = False
+
+        # Dummy values for remaining model inputs
         temperature = 25
         humidity = 60
         light_intensity = 500
         air_quality = 300
 
-        # Create input dataframe
+        # Create dataframe for prediction
         input_df = pd.DataFrame([{
             "Soil_Moisture": soil_moisture,
             "Temperature": temperature,
@@ -58,50 +67,50 @@ def run_ai_logic():
         # Model prediction
         prediction = model.predict(input_df)[0]
 
-        # Convert prediction to boolean
-        pump_on = bool(prediction)
-
-        # Safety logic
-        # Force ON if too dry
-        if soil_moisture < 20:
+        # Convert prediction safely
+        if str(prediction).lower() in ["1", "true", "on", "yes"]:
             pump_on = True
-
-        # Force OFF if wet enough
-        if soil_moisture > 30:
+        else:
             pump_on = False
 
-        # Save AI decision to Firebase
-        db.reference(
-            "/devices/ESP32_CF637C/commands/pump"
-        ).set(pump_on)
+        # Threshold Logic
+        if soil_moisture < 20:
+            pump_on = True
+        elif soil_moisture > 30:
+            pump_on = False
+        else:
+            # Between 20 and 30 keep previous state
+            pump_on = current_pump_state
 
-        # Save AI prediction info
+        # Save final pump command
+        pump_ref.set(pump_on)
+
+        # Save AI status
         db.reference(
             "/devices/ESP32_CF637C/aiStatus"
         ).set({
             "soilMoisture": soil_moisture,
-            "prediction": int(prediction),
+            "prediction": str(prediction),
             "pumpCommand": pump_on,
+            "currentPumpState": current_pump_state,
             "lastUpdated": int(time.time())
         })
 
+        # Logs
         print("====================================")
-        print(f"Soil Moisture: {soil_moisture}")
-        print(f"AI Prediction: {prediction}")
-        print(f"Pump Command: {'ON' if pump_on else 'OFF'}")
+        print("Soil Moisture:", soil_moisture)
+        print("Previous Pump State:", current_pump_state)
+        print("Raw Prediction:", prediction)
+        print("Final Pump Command:", "ON" if pump_on else "OFF")
         print("====================================")
 
     except Exception as e:
         print("AI Error:", e)
 
-# ================= BACKGROUND AI LOOP =================
+# ================= BACKGROUND LOOP =================
 def ai_loop():
     while True:
-        try:
-            run_ai_logic()
-        except Exception as e:
-            print("Loop Error:", e)
-
+        run_ai_logic()
         time.sleep(10)
 
 # Start AI loop in background
